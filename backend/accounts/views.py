@@ -6,6 +6,10 @@ from django.core.mail import send_mail
 from django.conf import settings
 import json
 from .models import User, PasswordResetCode
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    username_field = 'email'
 
 @csrf_exempt
 def register(request):
