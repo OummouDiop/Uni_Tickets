@@ -11,10 +11,6 @@ class IsStudent(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) and request.user.role == 'STUDENT'
 
-class IsAdmin(IsAuthenticated):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and request.user.role == 'ADMIN'
-
 class IsAgent(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) and request.user.role == 'AGENT'
@@ -34,11 +30,11 @@ class TicketRequestViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         if self.request.user.role != 'STUDENT':
-            raise serializers.ValidationError("Only students can create requests")
+            raise ValueError("Only students can create requests")
         start = serializer.validated_data['start_date']
         end = serializer.validated_data['end_date']
         if start >= end:
-            raise serializers.ValidationError("End date must be after start date")
+            raise ValueError("End date must be after start date")
         # Check no overlapping dates
         existing = TicketRequest.objects.filter(
             student=self.request.user,
@@ -47,32 +43,33 @@ class TicketRequestViewSet(viewsets.ModelViewSet):
             end_date__gte=start
         )
         if existing.exists():
-            raise serializers.ValidationError("Overlapping request dates")
+            raise ValueError("Overlapping request dates")
         serializer.save(student=self.request.user)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
-    def approve(self, request, pk=None):
-        ticket_request = self.get_object()
-        ticket_request.status = 'APPROVED'
-        ticket_request.approved_at = timezone.now()
-        ticket_request.save()
-        # Create tickets
-        current_date = ticket_request.start_date
-        while current_date <= ticket_request.end_date:
-            Ticket.objects.create(
-                request=ticket_request,
-                date=current_date
-            )
-            current_date += timedelta(days=1)
-        return Response({'status': 'approved'})
+    @action(detail=False, methods=['get'], permission_classes=[IsStudent])
+    def my_requests(self, request):
+        """Obtenir mes demandes"""
+        requests = TicketRequest.objects.filter(student=request.user)
+        serializer = self.get_serializer(requests, many=True)
+        return Response(serializer.data)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAdmin])
-    def reject(self, request, pk=None):
-        ticket_request = self.get_object()
-        ticket_request.status = 'REJECTED'
-        ticket_request.rejected_at = timezone.now()
-        ticket_request.save()
-        return Response({'status': 'rejected'})
+    @action(detail=False, methods=['get'], permission_classes=[IsStudent])
+    def statistics(self, request):
+        """Obtenir mes statistiques de tickets"""
+        requests = TicketRequest.objects.filter(student=request.user)
+        tickets = Ticket.objects.filter(request__student=request.user)
+        
+        stats = {
+            'total_requests': requests.count(),
+            'approved_requests': requests.filter(status='APPROVED').count(),
+            'rejected_requests': requests.filter(status='REJECTED').count(),
+            'valid_tickets': tickets.filter(status='VALID').count(),
+            'used_tickets': tickets.filter(status='USED').count(),
+            'expired_tickets': tickets.filter(status='EXPIRED').count(),
+            'total_spent': sum([r.total_amount for r in requests.filter(status='APPROVED')])
+        }
+        
+        return Response(stats)
 
 class TicketViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = TicketSerializer
@@ -87,17 +84,43 @@ class TicketViewSet(viewsets.ReadOnlyModelViewSet):
             return Ticket.objects.all()
         return Ticket.objects.none()
 
+    @action(detail=False, methods=['get'], permission_classes=[IsStudent])
+    def my_tickets(self, request):
+        """Obtenir mes tickets"""
+        tickets = Ticket.objects.filter(request__student=request.user)
+        serializer = self.get_serializer(tickets, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'], permission_classes=[IsAgent])
     def scan(self, request, pk=None):
+        """Scanner un ticket et le marquer comme utilisé"""
         ticket = self.get_object()
+        
         if ticket.status == 'USED':
-            return Response({'valid': False, 'message': 'Already used'})
+            return Response({
+                'valid': False,
+                'message': 'Already used',
+                'status': ticket.status
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         if ticket.date < timezone.now().date():
             ticket.status = 'EXPIRED'
             ticket.save()
-            return Response({'valid': False, 'message': 'Expired'})
+            return Response({
+                'valid': False,
+                'message': 'Expired',
+                'status': ticket.status
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         ticket.status = 'USED'
         ticket.used_at = timezone.now()
         ticket.scanned_by = request.user
         ticket.save()
-        return Response({'valid': True, 'message': 'Valid'})
+        
+        return Response({
+            'valid': True,
+            'message': 'Valid',
+            'status': ticket.status,
+            'student': f"{ticket.request.student.first_name} {ticket.request.student.last_name}",
+            'used_at': ticket.used_at
+        })
