@@ -14,8 +14,8 @@ def setup_django():
 
 def create_database():
     """Crée la base de données MySQL"""
-    import mysql.connector
-    from mysql.connector import Error
+    import mysql.connector # type: ignore
+    from mysql.connector import Error # type: ignore
     
     try:
         connection = mysql.connector.connect(
